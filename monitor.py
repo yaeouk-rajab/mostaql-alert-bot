@@ -6,8 +6,8 @@ import smtplib
 from email.message import EmailMessage
 import requests
 from bs4 import BeautifulSoup
+from curl_cffi import requests as cffi_requests
 
-# Retrieve credentials safely from GitHub Secrets
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
@@ -16,14 +16,24 @@ RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL")
 MOSTAQL_URL = "https://mostaql.com/projects/development"
 DB_FILE = "seen_projects.db"
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ar,en;q=0.9",
+# محاكاة هيدرز كاملة لمتصفح كروم حقيقي
+BROWSER_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Ch-Ua": '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
 }
+
+# جلسة بمحاكاة بصمة كروم TLS
+session = cffi_requests.Session(impersonate="chrome124")
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -100,11 +110,18 @@ def extract_hire_rate(soup: BeautifulSoup) -> float:
     return 0.0
 
 def fetch_details(url: str):
-    res = requests.get(url, headers=HEADERS, timeout=15)
-    if res.status_code != 200:
+    try:
+        res = session.get(url, headers=BROWSER_HEADERS, timeout=15)
+        if res.status_code != 200:
+            return None
+    except Exception as e:
+        print(f"Error fetching {url}: {e}")
         return None
+
     soup = BeautifulSoup(res.text, "html.parser")
     rate = extract_hire_rate(soup)
+    
+    # فلترة معدل التوظيف الأدنى 20%
     if rate < 20.0:
         return None
 
@@ -138,19 +155,27 @@ def generate_proposal(project: dict) -> str:
 
 def main():
     init_db()
-    res = requests.get(MOSTAQL_URL, headers=HEADERS, timeout=15)
-    if res.status_code != 200:
-        print(f"Could not load Mostaql list page (HTTP {res.status_code})")
+    try:
+        res = session.get(MOSTAQL_URL, headers=BROWSER_HEADERS, timeout=15)
+        if res.status_code != 200:
+            print(f"Could not load Mostaql list page (HTTP {res.status_code})")
+            return
+    except Exception as e:
+        print(f"Connection error: {e}")
         return
 
     soup = BeautifulSoup(res.text, "html.parser")
+    links = []
     for a in soup.find_all("a", href=True):
         m = re.search(r"/project/(\d+)", a["href"])
         if not m:
             continue
         pid = m.group(1)
         full_url = a["href"] if a["href"].startswith("http") else f"https://mostaql.com{a['href']}"
+        if full_url not in links:
+            links.append((pid, full_url))
 
+    for pid, full_url in links:
         if is_project_seen(pid):
             continue
 
@@ -165,4 +190,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-  
