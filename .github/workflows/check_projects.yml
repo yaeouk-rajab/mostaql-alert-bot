@@ -1,0 +1,45 @@
+name: Check Mostaql Projects
+
+on:
+  schedule:
+    # Runs every 15 minutes automatically
+    - cron: '*/15 * * * *'
+  workflow_dispatch: # Allows manual trigger from GitHub UI anytime
+
+concurrency:
+  group: mostaql-monitor
+  cancel-in-progress: false
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Preserves seen_projects.db across runs to prevent duplicate emails
+      - name: Cache Seen Projects Database
+        uses: actions/cache@v4
+        with:
+          path: seen_projects.db
+          key: mostaql-db-${{ github.run_id }}
+          restore-keys: |
+            mostaql-db-
+
+      - name: Install Dependencies
+        run: |
+          pip install requests beautifulsoup4
+
+      - name: Run Scraper
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python monitor.py
+        
