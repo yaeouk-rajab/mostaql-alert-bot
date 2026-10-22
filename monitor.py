@@ -105,7 +105,7 @@ def fetch_details(url: str):
         return None
     soup = BeautifulSoup(res.text, "html.parser")
     rate = extract_hire_rate(soup)
-    if rate < 50.0:
+    if rate < 20.0:
         return None
 
     title_el = soup.find("h1") or soup.find("title")
