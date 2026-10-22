@@ -2,9 +2,9 @@ name: Check Mostaql Projects
 
 on:
   schedule:
-    # Runs every 15 minutes automatically
-    - cron: '*/15 * * * *'
-  workflow_dispatch: # Allows manual trigger from GitHub UI anytime
+    # Triggers every 5 minutes (fastest native GitHub cron interval)
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 concurrency:
   group: mostaql-monitor
@@ -35,11 +35,19 @@ jobs:
         run: |
           pip install requests beautifulsoup4
 
-      - name: Run Scraper
+      - name: Run Scraper Every Minute
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
-        run: python monitor.py
-        
+        run: |
+          # Loops 4 times with a 60-second delay between checks
+          for i in {1..4}; do
+            echo "--- Iteration $i of 4 (1-minute interval) ---"
+            python monitor.py
+            if [ $i -lt 4 ]; then
+              sleep 60
+            fi
+          done
+          
