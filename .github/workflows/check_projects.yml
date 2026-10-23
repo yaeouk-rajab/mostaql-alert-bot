@@ -2,7 +2,6 @@ name: Check Mostaql Projects
 
 on:
   schedule:
-    # Triggers every 5 minutes (fastest native GitHub cron interval)
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
@@ -22,7 +21,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Preserves seen_projects.db across runs to prevent duplicate emails
       - name: Cache Seen Projects Database
         uses: actions/cache@v4
         with:
@@ -33,7 +31,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install requests beautifulsoup4 curl_cffi
+          pip install requests beautifulsoup4
 
       - name: Run Scraper Every Minute
         env:
@@ -41,8 +39,8 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
         run: |
-          # Loops 4 times with a 60-second delay between checks
           for i in {1..4}; do
             echo "--- Iteration $i of 4 (1-minute interval) ---"
             python monitor.py
