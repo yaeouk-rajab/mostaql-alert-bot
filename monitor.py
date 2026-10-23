@@ -3,27 +3,19 @@ import re
 import sqlite3
 import time
 import smtplib
+from urllib.parse import quote
 from email.message import EmailMessage
-import xml.etree.ElementTree as ET
 import requests
 from bs4 import BeautifulSoup
-from curl_cffi import requests as cffi_requests
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL")
+CF_WORKER_URL = os.getenv("CF_WORKER_URL", "").rstrip("/")
 
-MOSTAQL_RSS_URL = "https://mostaql.com/rss?category=development"
+MOSTAQL_TARGET_URL = "https://mostaql.com/projects/development"
 DB_FILE = "seen_projects.db"
-
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
-}
-
-session = cffi_requests.Session(impersonate="chrome124")
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -47,13 +39,21 @@ def mark_project_seen(project_id: str):
     conn.commit()
     conn.close()
 
+def proxied_get(target_url: str):
+    """Fetches any URL via the Cloudflare Worker proxy."""
+    if CF_WORKER_URL:
+        endpoint = f"{CF_WORKER_URL}/?url={quote(target_url)}"
+    else:
+        endpoint = target_url
+    return requests.get(endpoint, timeout=20)
+
 def send_email_alert(project_data: dict, proposal_content: str):
     msg = EmailMessage()
-    msg["Subject"] = f"🎯 مشروع مستقل جديد: {project_data['title']} ({project_data.get('hire_rate', 'غير محدد')}%)"
+    msg["Subject"] = f"🎯 مشروع مستقل جديد: {project_data['title']} ({project_data['hire_rate']}%)"
     msg["From"] = GMAIL_USER
     msg["To"] = RECIPIENT_EMAIL
 
-    plain_text = f"المشروع: {project_data['title']}\nالرابط: {project_data['url']}\n\nالعرض المقترح:\n{proposal_content}"
+    plain_text = f"المشروع: {project_data['title']}\nالرابط: {project_data['url']}\n\nالعرض:\n{proposal_content}"
     msg.set_content(plain_text)
 
     html_content = f"""
@@ -70,7 +70,7 @@ def send_email_alert(project_data: dict, proposal_content: str):
     </head>
     <body>
       <div class="card">
-        <span class="badge">معدل التوظيف: {project_data.get('hire_rate', 'غير محدد')}%</span>
+        <span class="badge">معدل التوظيف: {project_data['hire_rate']}%</span>
         <h2>{project_data['title']}</h2>
         <a href="{project_data['url']}" class="btn" target="_blank">فتح المشروع على مستقل</a>
         <h3 style="margin-top: 20px;">الخطة والعرض المقترح:</h3>
@@ -85,9 +85,9 @@ def send_email_alert(project_data: dict, proposal_content: str):
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
             server.send_message(msg)
-        print(f"[✓] Alert sent: {project_data['title']}")
+        print(f"Alert sent for: {project_data['title']}")
     except Exception as e:
-        print(f"[X] Failed sending email: {e}")
+        print(f"Failed sending alert: {e}")
 
 def extract_hire_rate(soup: BeautifulSoup) -> float:
     elements = soup.find_all(string=re.compile(r"معدل\s+التوظيف"))
@@ -99,102 +99,70 @@ def extract_hire_rate(soup: BeautifulSoup) -> float:
                 return float(m.group(1))
     return 0.0
 
-def fetch_project_page_details(url: str, fallback_desc: str):
-    try:
-        res = session.get(url, headers=BROWSER_HEADERS, timeout=15)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
-            rate = extract_hire_rate(soup)
-            
-            desc_el = soup.find("div", class_="project__brief") or soup.find("div", class_="card-body")
-            desc = desc_el.get_text(strip=True) if desc_el else fallback_desc
-            
-            questions = [q.get_text(strip=True) for q in soup.find_all("div", class_="project-question") if q.get_text(strip=True)]
-            return rate, desc, questions
-    except Exception as e:
-        print(f"Project page request error: {e}")
+def fetch_details(url: str):
+    res = proxied_get(url)
+    if res.status_code != 200:
+        return None
+    soup = BeautifulSoup(res.text, "html.parser")
+    rate = extract_hire_rate(soup)
+    if rate < 20.0:
+        return None
 
-    # إذا تعذر جلب صفحة المشروع بسبب الحظر، نعتمد على وصف الـ RSS
-    return 100.0, fallback_desc, []
+    title_el = soup.find("h1") or soup.find("title")
+    title = title_el.get_text(strip=True) if title_el else "مشروع جديد"
+    desc_el = soup.find("div", class_="project__brief") or soup.find("div", class_="card-body")
+    desc = desc_el.get_text(strip=True) if desc_el else ""
 
-def generate_proposal(title: str, description: str, questions: list) -> str:
+    questions = [q.get_text(strip=True) for q in soup.find_all("div", class_="project-question") if q.get_text(strip=True)]
+
+    return {"url": url, "title": title, "description": desc, "hire_rate": rate, "questions": questions}
+
+def generate_proposal(project: dict) -> str:
     prompt = f"""
-أنت مبرمج ومطور محترف تتقدم لمشروع على منصة مستقل.
+أنت مبرمج ومطور محترف تتقدم لمشروع على مستقل.
 اكتب عرضاً (Bid Proposal) احترافياً ومقنعاً بلغة المشروع:
-
-العنوان: {title}
-التفاصيل: {description}
-الأسئلة الإضافية: {questions if questions else 'لا يوجد'}
+العنوان: {project['title']}
+التفاصيل: {project['description']}
+الأسئلة: {project['questions'] if project['questions'] else 'لا يوجد'}
 
 الشروط:
-1. فهم دقيق للهدف المطلوب.
-2. خطة تنفيذ عملية ومقسمة على مراحل (Execution Plan).
+1. فهم دقيق للهدف.
+2. خطة تنفيذ عملية وواضحة (Execution Plan).
 3. تحديد سعر ومدة واقعيين.
-4. إجابات محددة ومقنعة على الأسئلة إن وجدت.
+4. الإجابة عن أي أسئلة للمشروع.
 """
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     res = requests.post(api_url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
     data = res.json()
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
-def fetch_rss_feed():
-    try:
-        # RSS endpoints are often served without Cloudflare anti-bot blocks
-        res = session.get(MOSTAQL_RSS_URL, headers=BROWSER_HEADERS, timeout=15)
-        if res.status_code != 200:
-            print(f"Could not load Mostaql RSS feed (HTTP {res.status_code})")
-            return []
-        
-        root = ET.fromstring(res.content)
-        items = []
-        for item in root.findall(".//item"):
-            link = item.findtext("link", "").strip()
-            title = item.findtext("title", "").strip()
-            desc = item.findtext("description", "").strip()
-            
-            # Clean HTML from RSS description
-            clean_desc = BeautifulSoup(desc, "html.parser").get_text(strip=True)
-            
-            m = re.search(r"/project/(\d+)", link)
-            if m:
-                items.append({
-                    "id": m.group(1),
-                    "url": link,
-                    "title": title,
-                    "description": clean_desc
-                })
-        return items
-    except Exception as e:
-        print(f"Error parsing RSS: {e}")
-        return []
-
 def main():
     init_db()
-    projects = fetch_rss_feed()
-    print(f"Found {len(projects)} projects in RSS feed.")
+    res = proxied_get(MOSTAQL_TARGET_URL)
+    if res.status_code != 200:
+        print(f"Failed to fetch list page: Status {res.status_code}")
+        return
 
-    for p in projects:
-        pid = p["id"]
+    soup = BeautifulSoup(res.text, "html.parser")
+    for a in soup.find_all("a", href=True):
+        m = re.search(r"/project/(\d+)", a["href"])
+        if not m:
+            continue
+        pid = m.group(1)
+        full_url = a["href"] if a["href"].startswith("http") else f"https://mostaql.com{a['href']}"
+
         if is_project_seen(pid):
             continue
 
-        hire_rate, full_desc, questions = fetch_project_page_details(p["url"], p["description"])
+        details = fetch_details(full_url)
         mark_project_seen(pid)
 
-        # فلترة معدل التوظيف 20%
-        if hire_rate >= 20.0:
-            print(f"[+] Processing new project ({hire_rate}%): {p['title']}")
-            project_data = {
-                "url": p["url"],
-                "title": p["title"],
-                "hire_rate": hire_rate
-            }
-            proposal = generate_proposal(p["title"], full_desc, questions)
-            send_email_alert(project_data, proposal)
-        else:
-            print(f"[-] Skipped project (hire rate {hire_rate}% < 20%): {p['title']}")
-
-        time.sleep(2)
+        if details:
+            print(f"Qualified project ({details['hire_rate']}%): {details['title']}")
+            proposal = generate_proposal(details)
+            send_email_alert(details, proposal)
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()
+    
